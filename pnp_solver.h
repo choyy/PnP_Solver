@@ -29,5 +29,9 @@ void computeRt( const std::vector<Eigen::Vector3d>& pts3d_camera, const std::vec
 double reprojectionError( const Eigen::Matrix3d& K, const std::vector<Eigen::Vector3d>& pts3d_world, const std::vector<Eigen::Vector2d>& pts2d, const Eigen::Matrix3d& R, const Eigen::Vector3d& t );
 
 
+/************** Functions for ParaPersGN solver ******************/
+bool solvePnPbyParaPers ( const Eigen::Matrix3d& K, const std::vector< Eigen::Vector3d >& pts3d, const std::vector< Eigen::Vector2d >& pts2d, Eigen::Matrix3d& R, Eigen::Vector3d& t );
+void solveBetas(Eigen::Matrix3d& R, Eigen::Vector3d& t, Eigen::Matrix<double, 12, 4>& eigen_vectors, std::vector<Eigen::Vector3d>& world_control_points, Eigen::Vector4d& betas);
+bool solvePnPbyParaPersGN ( const Eigen::Matrix3d& K, const std::vector< Eigen::Vector3d >& pts3d, const std::vector< Eigen::Vector2d >& pts2d, Eigen::Matrix3d& R, Eigen::Vector3d& t );
 
 #endif // PNP_SOLVER_H

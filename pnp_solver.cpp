@@ -132,6 +132,95 @@ bool solvePnPbyDLT ( const Eigen::Matrix3d& K, const std::vector< Eigen::Vector3
     return true;
 }
 
+bool solvePnPbyParaPers ( const Eigen::Matrix3d& K, const std::vector< Eigen::Vector3d >& pts3d, const std::vector< Eigen::Vector2d >& pts2d, Eigen::Matrix3d& R, Eigen::Vector3d& t ){
+    // Check input data.
+    if ( pts2d.size() < 4 || pts2d.size() != pts3d.size() ) {
+        return false;
+    }
+
+    int n = pts3d.size();
+    // get camera intrinsics
+    const double fx = K(0, 0);
+    const double fy = K(1, 1);
+    const double cx = K(0, 2);
+    const double cy = K(1, 2);
+    Eigen::MatrixXd Pw { Eigen::MatrixXd::Ones(4, n) };
+    Eigen::MatrixXd Q { Eigen::MatrixXd::Ones(2, n) };
+    for(int i = 0; i < n; i ++){
+        Pw.block(0, i, 3, 1) = pts3d[i];
+        Q.block(0, i, 2, 1) = pts2d[i];
+    }
+    Q.row(0) = (Q.row(0).array() - cx) / fx;
+    Q.row(1) = (Q.row(1).array() - cy) / fy;
+    // solve parallel perspective model for R, t
+    Eigen::MatrixXd PPT = Pw * Pw.transpose();
+    Eigen::MatrixXd Pwuv = Pw * Q.transpose();
+    Eigen::MatrixXd IJp = PPT.inverse() * Pwuv;
+    Eigen::Vector3d Ip = IJp.block(0, 0, 3, 1);
+    Eigen::Vector3d Jp = IJp.block(0, 1, 3, 1);
+    double x0 { IJp(3, 0) }, y0 { IJp(3, 1) };
+    Eigen::Matrix3d I_anti, J_anti;
+    I_anti << 0, -Ip(2), Ip(1),
+              Ip(2), 0, -Ip(0),
+             -Ip(1), Ip(0), 0;
+    J_anti << 0, -Jp(2), Jp(1),
+              Jp(2), 0, -Jp(0),
+             -Jp(1), Jp(0), 0;
+    auto tz = (sqrt(1 + x0 * x0) / Ip.norm() + sqrt(1 + y0 * y0) / Jp.norm()) / 2;
+    Eigen::Vector3d k = (Eigen::Matrix3d::Identity() - tz*y0*I_anti + tz*x0*J_anti).inverse()*Ip.cross(Jp)*tz*tz;  k = k/k.norm();
+    Eigen::Vector3d i = tz*Ip + x0*k; i = i/i.norm();
+    Eigen::Vector3d j = tz*Jp + y0*k; j = j/j.norm();
+    R.row(0) = i; R.row(1) = j; R.row(2) = k;
+    t = Eigen::Vector3d(x0 * tz, y0 * tz, tz);
+
+    return true;
+}
+
+bool solvePnPbyParaPersGN ( const Eigen::Matrix3d& K, const std::vector< Eigen::Vector3d >& pts3d, const std::vector< Eigen::Vector2d >& pts2d, Eigen::Matrix3d& R, Eigen::Vector3d& t ){
+    // Check input data.
+    if ( pts2d.size() < 4 || pts2d.size() != pts3d.size() ) {
+        return false;
+    }
+
+    // select control point in world coordinate frame.
+    std::vector<Eigen::Vector3d> world_control_points;
+    selectControlPoints ( pts3d, world_control_points );
+
+    // compute homogeneous barycentric coordinates
+    std::vector<Eigen::Vector4d> hb_coordinates;
+    computeHomogeneousBarycentricCoordinates ( pts3d, world_control_points, hb_coordinates );
+
+    // compute control point in camera coordinate frame.
+    // construct Mx = 0
+    Eigen::MatrixXd M;
+    constructM ( K, hb_coordinates, pts2d, M );
+    Eigen::Matrix<double, 12, 4> eigen_vectors;
+    getFourEigenVectors ( M, eigen_vectors );
+
+    // construct L * \beta = \rho.
+    Eigen::Matrix<double, 6, 10> L;
+    computeL ( eigen_vectors, L );
+
+    Eigen::Matrix<double, 6, 1> rho;
+    computeRho ( world_control_points, rho );
+
+    // solve for betas using R, t
+    solvePnPbyParaPers(K, pts3d, pts2d, R, t);
+    Eigen::Vector4d betas;
+    solveBetas(R, t, eigen_vectors, world_control_points, betas);
+
+    // optimize for betas and get the ultimate R, t
+    optimizeBeta(L, rho, betas);
+
+    std::vector<Eigen::Vector3d> camera_control_points;
+    computeCameraControlPoints(eigen_vectors, betas, camera_control_points);
+
+    std::vector<Eigen::Vector3d> pts3d_camera;
+    rebuiltPts3dCamera(camera_control_points, hb_coordinates, pts3d_camera);
+
+    computeRt(pts3d_camera, pts3d, R, t);
+    return true;
+}
 
 /******************************************
  * **************** EPnP ******************
@@ -277,7 +366,7 @@ void computeHomogeneousBarycentricCoordinates ( const std::vector< Eigen::Vector
     for ( int i = 0; i < 4; i ++ ) {
         C.block ( 0, i, 3, 1 ) = control_points.at ( i );
     }
-    C.block ( 3, 0, 1, 4 ) = Eigen::Vector4d ( 1.0, 1.0, 1.0, 1.0 );
+    C.row ( 3 ) = Eigen::Vector4d ( 1.0, 1.0, 1.0, 1.0 );
 
     Eigen::Matrix4d C_inv = C.inverse();
 
@@ -672,4 +761,11 @@ double reprojectionError ( const Eigen::Matrix3d& K, const std::vector< Eigen::V
     return sqrt ( sum_err2 / ( double ) n );
 }
 
-
+void solveBetas(Eigen::Matrix3d& R, Eigen::Vector3d& t, Eigen::Matrix<double, 12, 4>& eigen_vectors, std::vector<Eigen::Vector3d>& world_control_points, Eigen::Vector4d& betas)
+{
+    Eigen::MatrixXd c(12, 1);
+    for(int i = 0; i < 4; i++){
+        c.block(i * 3, 0, 3, 1) = R * world_control_points[i] + t;
+    }
+    betas = (eigen_vectors.transpose()*eigen_vectors).inverse()*eigen_vectors.transpose()*c;
+}
